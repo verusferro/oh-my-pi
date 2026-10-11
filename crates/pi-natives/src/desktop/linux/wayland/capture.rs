@@ -1,16 +1,17 @@
-use std::{
-	cell::RefCell,
-	os::fd::OwnedFd,
-	rc::Rc,
-	time::{Duration, Instant},
-};
+#[cfg(feature = "wayland-pipewire")]
+use std::{cell::RefCell, rc::Rc, time::Instant};
+use std::{os::fd::OwnedFd, time::Duration};
 
+#[cfg(not(feature = "wayland-pipewire"))]
+use ashpd::desktop::screenshot::Screenshot;
 use ashpd::desktop::{
 	PersistMode, Session,
 	screencast::{CursorMode, Screencast, SourceType},
 };
 use image::RgbaImage;
+#[cfg(feature = "wayland-pipewire")]
 use pipewire as pw;
+#[cfg(feature = "wayland-pipewire")]
 use pw::{properties::properties, spa};
 
 use super::portal::{read_token, store_token};
@@ -21,6 +22,7 @@ use crate::desktop::{
 
 const SCREENCAST_TOKEN: &str = "screencast-token";
 const PORTAL_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(feature = "wayland-pipewire")]
 const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct ScreenCast {
@@ -101,10 +103,71 @@ async fn open_screencast() -> CoreResult<ScreenCast> {
 	}
 }
 
+/// Whether a Screenshot-portal image can be the `ScreenCast` monitor: the
+/// portal captures the whole workspace, so on a multi-monitor layout its
+/// aspect ratio differs from the selected monitor's logical size.
+#[cfg(any(not(feature = "wayland-pipewire"), test))]
+fn screenshot_matches_monitor(width: u32, height: u32, size: Option<(i32, i32)>) -> bool {
+	let Some((w, h)) = size.filter(|&(w, h)| w > 0 && h > 0) else {
+		return true;
+	};
+	let (image_cross, monitor_cross) = (u64::from(width) * h as u64, u64::from(height) * w as u64);
+	// Allow 1% for per-axis rounding of fractional scales.
+	image_cross.abs_diff(monitor_cross) * 100 <= monitor_cross
+}
+
+/// Grab a frame through the Screenshot portal, the route available without
+/// linking libpipewire. The portal writes a PNG file, which is always removed.
+#[cfg(not(feature = "wayland-pipewire"))]
+async fn grab_screenshot_frame(
+	size: Option<(i32, i32)>,
+	pixels: bool,
+) -> CoreResult<CapturedFrame> {
+	let uri = portal_request(async {
+		let response = Screenshot::request()
+			.interactive(false)
+			.modal(false)
+			.send()
+			.await
+			.map_err(|err| format!("Screenshot portal: {err}"))?
+			.response()
+			.map_err(|err| format!("Screenshot permission: {err}"))?;
+		Ok(response.uri().clone())
+	})
+	.await?;
+	let path = uri
+		.to_file_path()
+		.map_err(|()| DesktopError::capture_failed(format!("Screenshot portal returned {uri}")))?;
+	let read = || -> Result<CapturedFrame, image::ImageError> {
+		let reader = image::ImageReader::open(&path)?.with_guessed_format()?;
+		if pixels {
+			let image = reader.decode()?.into_rgba8();
+			let (width, height) = image.dimensions();
+			Ok(CapturedFrame { image: Some(image), width, height })
+		} else {
+			let (width, height) = reader.into_dimensions()?;
+			Ok(CapturedFrame { image: None, width, height })
+		}
+	};
+	let frame = read();
+	let _ = std::fs::remove_file(&path);
+	let frame = frame
+		.map_err(|err| DesktopError::capture_failed(format!("Screenshot portal image: {err}")))?;
+	if !screenshot_matches_monitor(frame.width, frame.height, size) {
+		return Err(DesktopError::capture_failed(
+			"the Screenshot portal captured a multi-monitor workspace; per-monitor Wayland capture \
+			 requires the wayland-pipewire feature",
+		));
+	}
+	Ok(frame)
+}
+
+#[cfg(feature = "wayland-pipewire")]
 struct UserData {
 	format: spa::param::video::VideoInfoRaw,
 }
 
+#[cfg(feature = "wayland-pipewire")]
 fn rgba_from_buffer(
 	format: &spa::param::video::VideoInfoRaw,
 	data: &mut pw::spa::buffer::Data,
@@ -194,6 +257,7 @@ fn rgba_from_buffer(
 		.ok_or_else(|| "failed to construct PipeWire RGBA frame".to_string())
 }
 
+#[cfg(feature = "wayland-pipewire")]
 fn grab_pipewire_frame(node: u32, fd: OwnedFd, pixels: bool) -> CoreResult<CapturedFrame> {
 	control::check()?;
 	pw::init();
@@ -324,7 +388,13 @@ fn capture_stream(pixels: bool) -> CoreResult<(CapturedFrame, super::PortalGeome
 	control::check()?;
 	let runtime = super::portal::portal_runtime()?;
 	let ScreenCast { node, fd, position, size, session } = runtime.block_on(open_screencast())?;
+	#[cfg(feature = "wayland-pipewire")]
 	let captured = grab_pipewire_frame(node, fd, pixels);
+	#[cfg(not(feature = "wayland-pipewire"))]
+	let captured = {
+		drop((node, fd));
+		runtime.block_on(grab_screenshot_frame(size, pixels))
+	};
 	let _ = runtime.block_on(async {
 		tokio::time::timeout(crate::desktop::CLOSE_TIMEOUT, session.close()).await
 	});
@@ -357,5 +427,16 @@ mod tests {
 		source.cancel();
 		let result = control::with_token_for_test(&token, geometry);
 		assert_eq!(result.unwrap_err().code, token.check().unwrap_err().code);
+	}
+
+	#[test]
+	fn screenshot_must_cover_only_the_screencast_monitor() {
+		// Scale-1.25 single monitor: 2400x1350 physical pixels for 1920x1080
+		// logical.
+		assert!(screenshot_matches_monitor(2400, 1350, Some((1920, 1080))));
+		// Two 1920x1080 monitors side by side: the workspace shot is 3840x1080.
+		assert!(!screenshot_matches_monitor(3840, 1080, Some((1920, 1080))));
+		// No logical size from the portal: nothing to compare against.
+		assert!(screenshot_matches_monitor(3840, 1080, None));
 	}
 }

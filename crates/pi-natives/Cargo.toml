@@ -17,8 +17,9 @@ workspace = true
 [features]
 # Off by default: the pipewire crate hard-links system libpipewire-0.3 via
 # pkg-config, which no CI/cross triple (musl, arm64) can satisfy, and the
-# Bazel-shipped addons build with crate_features = [] anyway. Linux devs who
-# want Wayland screencast opt in with `--features wayland-pipewire`.
+# Bazel-shipped addons build with crate_features = [] anyway. Without it,
+# Wayland capture uses the Screenshot portal (whole workspace, single monitor
+# only); `--features wayland-pipewire` reads ScreenCast frames per monitor.
 default = []
 wayland-pipewire = ["dep:pipewire"]
 
