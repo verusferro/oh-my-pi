@@ -1,5 +1,6 @@
 #[cfg(feature = "wayland-pipewire")]
 mod capture;
+mod kwin;
 mod libei;
 mod portal;
 mod xkb;
@@ -178,8 +179,11 @@ impl WaylandBackend {
 		result
 	}
 
+	/// AT-SPI windows, completed by `KWin`'s window list when `KWin` is the
+	/// compositor: it reports windows without AT-SPI frames and their global
+	/// positions.
 	fn atspi_windows(&self) -> CoreResult<Vec<AtSpiWindow>> {
-		self
+		let atspi = self
 			.ax
 			.as_ref()
 			.ok_or_else(|| {
@@ -187,8 +191,13 @@ impl WaylandBackend {
 					.ax_error
 					.clone()
 					.unwrap_or_else(DesktopError::ax_unsupported)
-			})?
-			.windows()
+			})
+			.and_then(AtSpiAx::windows);
+		let Some(kwin) = kwin::windows()? else {
+			return atspi;
+		};
+		// Same cap as the AT-SPI enumeration.
+		Ok(kwin::merge(atspi.unwrap_or_default(), kwin, 48))
 	}
 }
 

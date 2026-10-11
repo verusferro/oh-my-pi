@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- KDE Plasma Wayland window listing now includes windows that expose no accessibility tree, such as Chromium browsers and GPU-drawn terminals, and window screenshots can locate apps that cannot report their screen position.
+
 ### Fixed
 
 - Fixed stalls when highlighting Markdown tool previews with many inline spans or backslash escapes ([#13838](https://github.com/can1357/oh-my-pi/pull/13838) by [@sjawhar](https://github.com/sjawhar), [#15272](https://github.com/can1357/oh-my-pi/pull/15272) by [@iliaal](https://github.com/iliaal)).
